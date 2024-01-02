@@ -38,7 +38,11 @@ void TstatOnOffControl::set(float setPointF, float idlebandF) {
   */
 }
 
-void TstatOnOffControl::setDeviceName(char *s) {
+void TstatOnOffControl::dumpConfig() {
+  Serial.print(name); Serial.print(" SP="); Serial.print(setpoint); Serial.print(" IB="); Serial.println(idleband);
+}
+
+void TstatOnOffControl::setDeviceName(const char *s) {
   uint8_t n=0;
   char c;
   do {
@@ -76,40 +80,34 @@ void TstatOnOffControl::test() {
 }
 
 uint8_t TstatOnOffControl::poll(float tempF) {
-  //Serial.print(name); Serial.print("->");
+  //Serial.print(name); Serial.print("-> "); Serial.print(tempF); Serial.print(" -> ");
   lastTemp = tempF;
   if (tempF < (setpoint-idleband/2)) {
 	if (mode==MODE_HEAT) {
-	  //Serial.println("ON");
+	  //Serial.println("ON ");
 	  digitalWrite(ssrPin, LOW);
 	  lastOutput = LOW;
 	} else {
-	  //Serial.println("OFF");
+	  //Serial.println("OFF ");
 	  digitalWrite(ssrPin, HIGH);
 	  lastOutput = HIGH;
 	}
   } else if (tempF > (setpoint+idleband/2)) {
 	if (mode==MODE_HEAT) {
-	  //Serial.println("OFF");
+	  //Serial.println("OFF ");
 	  digitalWrite(ssrPin, HIGH);
 	  lastOutput = HIGH;
 	} else {
-	  //Serial.println("ON");
+	  //Serial.println("ON ");
 	  digitalWrite(ssrPin, LOW);
 	  lastOutput = LOW;
 	}
-  } else {
-	// let it ride!
-	  /*
-	if (lastOutput == LOW)
-	  Serial.println("ON SOAK");
-	else
-	  Serial.println("OFF SOAK");
-	  */
+  } else {	
+	//Serial.println("SOAK");
 	digitalWrite(ssrPin, lastOutput);
   }
 
-  return lastOutput;
+  return !lastOutput;
 
 }
 

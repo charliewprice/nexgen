@@ -9,7 +9,7 @@
 #define EEPROM_H_
 
 #define _EEPROM_IC2_ADDR 		0x50		//the I2C bus address for the EEPROM
-#define EEPROM_CONFIG_ADDRESS 	30
+#define EEPROM_CONFIG_ADDRESS 	0
 #define _EEPROMUPDATE_MILLIS 	30000
 
 class Eeprom {

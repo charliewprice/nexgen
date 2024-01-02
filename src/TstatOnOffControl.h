@@ -27,7 +27,8 @@ class TstatOnOffControl {
     uint8_t getStatus();
     float getLastTemp();
     float getSetPoint();
-    void  setDeviceName(char *s);
+    void  setDeviceName(const char *s);
+    void  dumpConfig();
   private:
     char name[16];
     uint8_t ssrPin;

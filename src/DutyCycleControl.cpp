@@ -43,7 +43,7 @@ uint8_t DutyCycleControl::clock(float tempF) {
 	  digitalWrite(ssrPin, HIGH);
 	  lastOutput = HIGH;
 	}
-	return lastOutput;
+	return !lastOutput;
 }
 
 

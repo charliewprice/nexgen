@@ -10,20 +10,21 @@ CurtainController::CurtainController() {
   status = _IDLE;
 }
 
-void CurtainController::set(uint16_t opPeriodSecs, uint16_t opOnSecs,
-                            uint16_t clPeriodSecs,uint16_t clOnSecs,
+void CurtainController::set(uint16_t pSecs, uint16_t oSecs,
 	                        double setpTDegrees, double idlebndDegrees) {
-	openPeriodSecs = opPeriodSecs;
-	openOnSecs = opOnSecs;
-	closePeriodSecs = clPeriodSecs;
-	closeOnSecs = clOnSecs;
+	periodSecs = pSecs;
+	onSecs = oSecs;	
 	setpointDegrees = setpTDegrees;
 	idlebandDegrees = idlebndDegrees;
+	status = _IDLE;
+	cycleSecsRemaining = periodSecs;
+}
 
-
-	//char display[32];
-	//sprintf(display,"%s sp=%u ib=%u",name,(uint8_t) setpointDegrees,(uint8_t) idlebndDegrees);
-	//Serial.println(display);
+void CurtainController::dumpConfig() {
+	char buf[64];
+	sprintf(buf,"%s psecs %u osecs %u",name,periodSecs,onSecs);
+	Serial.println(buf);
+	Serial.print(setpointDegrees); Serial.print(" "); Serial.println(idlebandDegrees);
 }
 
 void CurtainController::setOutput(uint8_t op, uint8_t cp) {
@@ -31,7 +32,7 @@ void CurtainController::setOutput(uint8_t op, uint8_t cp) {
 	closepin = cp;
 }
 
-void CurtainController::setDeviceName(char *s) {
+void CurtainController::setDeviceName(const char *s) {
   uint8_t n=0;
   char c;
   do {
@@ -45,51 +46,38 @@ uint8_t CurtainController::getStatus() {
   return status;
 }
 
-void CurtainController::clock() {
-  cycleSecsRemaining -= 1;
-  if(cycleSecsRemaining==0) {
-    digitalWrite(closepin, OUTPUT_OFF);
-    digitalWrite(openpin, OUTPUT_OFF);
-    status = _IDLE;
-  } else {
-	  if (status == _CLOSING) {
-		if(cycleSecsRemaining<(closePeriodSecs-closeOnSecs)) {
-		  digitalWrite(closepin, OUTPUT_OFF);
-		  status = _CLOSESOAK;
-		} else
-		  digitalWrite(closepin, OUTPUT_ON);
-	  } else if (status == _OPENING) {
-		if(cycleSecsRemaining<(openPeriodSecs-openOnSecs)) {
-		  digitalWrite(openpin, OUTPUT_OFF);
-		  status = _OPENSOAK;
-		} else
-		  digitalWrite(openpin, OUTPUT_ON);
-	  }
-  }
-
-}
-
 uint8_t CurtainController::poll(float temperature) {
-  if (temperature<(setpointDegrees-(idlebandDegrees/2))) {
-	  //initiate new CLOSE/HEAT cycle
-	  status = _CLOSING;
-	  cycleSecsRemaining = closePeriodSecs;
-  } else  if (temperature>(setpointDegrees+(idlebandDegrees/2))) {
-	  //initiate new OPEN/COOL cycle
-	  status = _OPENING;
-	  cycleSecsRemaining = openPeriodSecs;
-  }
-  /*
-  Serial.print(name); Serial.print("->");
-  switch(status) {
-  case _IDLE:       Serial.println("IDLE"); break;
-  case _CLOSING:      Serial.println("CLOSING"); break;
-  case _CLOSESOAK: Serial.println("CLOSE SOAK"); break;
-  case _OPENING:       Serial.println("OPENING"); break;
-  case _OPENSOAK:  Serial.println("OPEN SOAK"); break;
-  }
-  */
+  //Serial.print(cycleSecsRemaining); Serial.print(" temp "); Serial.print(temperature);
+  if (cycleSecsRemaining == 0) {	
+	//Serial.println(" CYC ");
+	cycleSecsRemaining = periodSecs;
+  } else if (cycleSecsRemaining==periodSecs) {	
+	if (temperature<(setpointDegrees-(idlebandDegrees/2))) {
+	   status = _CLOSING;
+	} else if (temperature>(setpointDegrees+(idlebandDegrees/2))) {
+	   status = _OPENING;
+	} else {
+	   status = _IDLE;
+	}
 
+	//Serial.print(" "); Serial.print(status);
+
+	switch (status) {
+		case _CLOSING: digitalWrite(closepin, OUTPUT_ON); break; //Serial.println(" CLOSING"); break;
+		case _OPENING: digitalWrite(openpin, OUTPUT_ON);  break; //Serial.println(" OPENING"); break;
+	    default: break; //Serial.println(" IDLE"); break; 
+	}  
+	cycleSecsRemaining -= 1;
+  } else if (cycleSecsRemaining < (periodSecs - onSecs)) {
+	  //Serial.println(" SOAKING ");
+	  digitalWrite(closepin, OUTPUT_OFF);
+	  digitalWrite(openpin, OUTPUT_OFF);
+	  status = _SOAKING;
+	  cycleSecsRemaining -= 1;
+  } else {
+	//Serial.println("");
+	cycleSecsRemaining -= 1;
+  }
   return status;
 }
 

@@ -16,19 +16,24 @@ class TdynDutyCycleControl {
 public:
 	TdynDutyCycleControl();
 	virtual ~TdynDutyCycleControl();
-	void setpoint(float min, float max, float onset, float thresh);
+	void setCycleTimeSecs(uint16_t cycletimesecs);
+	void setFunction(float a[4][3]);
 	uint8_t poll(float temp);
 	void setOutput(uint8_t p);
-	void setDeviceName(char *s);
+	void setDeviceName(const char *s);
+	float getDutyFactor();
 
 private:
+    float calculateDutyFactor(float x);
+	float fn[4][3];
 	char name[16];
 	uint8_t ssrPin;
-	float df_minimum;
-	float df_maximum;
-	float temp_rampOnset;
-	float temp_rampThresh;
+	//float df_minimum;
+	//float df_maximum;
+	//float temp_rampOnset;
+	//float temp_rampThresh;
 	float dutyFactor;
+	uint16_t cycletimesecs;
 	uint8_t lastOutput;
 	uint16_t onTicks;
 };
