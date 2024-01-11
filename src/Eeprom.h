@@ -8,6 +8,8 @@
 #ifndef EEPROM_H_
 #define EEPROM_H_
 
+#include "common.h"
+
 #define _EEPROM_IC2_ADDR 		0x50		//the I2C bus address for the EEPROM
 #define EEPROM_CONFIG_ADDRESS 	0
 #define _EEPROMUPDATE_MILLIS 	30000

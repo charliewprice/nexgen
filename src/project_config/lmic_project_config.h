@@ -8,5 +8,5 @@
 #define DISABLE_BEACONS
 #define LMIC_ENABLE_long_messages 1
 
-//#define LMIC_DEBUG_LEVEL 2
+#define LMIC_DEBUG_LEVEL 5
 //#define LMIC_PRINTF_TO Serial

@@ -1,7 +1,8 @@
 #include <Arduino.h>
+#include "wiring_private.h" // pinPeripheral() function
 
 ///#define _TEST_WATCHDOG		//used to determine the actual watchdog timeout
-//#define WAIT_FOR_SERIALDEBUG
+#define WAIT_FOR_SERIALDEBUG
 //#define _DEBUG_SERIAL
 
 #define CONFIGURATION_ID 9008
@@ -24,13 +25,17 @@
 #include <RTCZero.h>
 #include <Adafruit_NeoPixel.h>
 
-#define HEATPAD_OUTPUT A2
-#define SPACEHEATER_OUTPUT 5
-#define STIRFAN_OUTPUT 9
-#define CURTAIN_OPENOUTPUT A4
-#define CURTAIN_CLOSEOUTPUT A3
-#define VENTILATION_OUTPUT 10
-#define FOGGER_OUTPUT 10
+#include "common.h"
+
+#define HEATPAD_OUTPUT          0x0100
+#define FOGGER_OUTPUT           0x0200
+#define STIRFAN_OUTPUT          0x0400
+#define CURTAIN_OPENOUTPUT      0x0800
+#define CURTAIN_CLOSEOUTPUT     0x1000
+#define EVAC_OUTPUT             0x2000
+#define SPACEHEATER_OUTPUT      0x4000  
+  
+#define RS485_DIR 13
 
 //#define BTSERIALTERMINAL
 
@@ -48,33 +53,23 @@ Adafruit_NeoPixel pixels = Adafruit_NeoPixel(NUMPIXELS, PIXELPIN, NEO_GRB + NEO_
 
 #include "TstatOnOffControl.h"
 TstatOnOffControl heatPadController;
-uint8_t heatPad_OP;
-
 TstatOnOffControl spaceHeaterController;
-uint8_t spaceHeater_OP;
-
 TstatOnOffControl stirFanController;
-uint8_t stirFan_OP;
 
 #include "CurtainController.h"
 CurtainController curtainController;
-uint8_t curtain_OP;
 
 #include "TdynDutyCycleControl.h"
-TdynDutyCycleControl ventilationController;
-uint8_t ventilation_OP;
-
+TdynDutyCycleControl evacfanController;
 TdynDutyCycleControl foggerController;
-uint8_t fogger_OP;
-
 
 #include "Eeprom.h"
 Eeprom eeprom;
 #define _EEPROMUPDATE_MILLIS 	30000
 boolean updateEeprom;
 
-#define SerialTerminal Serial1
-#define SerialDebug Serial
+//Uart Serial2 (&sercom1, 11, 10, SERCOM_RX_PAD_0, UART_TX_PAD_2);
+#define rs485Serial Serial1
 
 #define _WATCHDOG_DONE 12
 #define _TESTBED_PIN    5
@@ -92,9 +87,13 @@ boolean updateEeprom;
 #define _WATCHDOG_DONE 12				// pulsed once on each LoRa TX_COMPLETE event
 #define _LOOP_PULSE_PIN 5				// pulsed once on each iteration of loop()
 #define _BUZZER_PIN A3					// used for _LIQUID_LEVEL and _GEOLOCATION sensortypes only
-#define _SEND_INTERVAL_SECONDS 15
-#define TX_INTERVAL_SECONDS 5        	// Schedule the interval(seconds) at which data is sent
-static osjob_t sendjob;
+//#define _SEND_INTERVAL_SECONDS 15
+#define LORA_TX_INTERVAL_SECONDS 5       	// Schedule the interval(seconds) at which data is sent
+
+static osjob_t sendLoRaJob;
+static osjob_t sendRS485Job;
+static osjob_t processJob;
+
 boolean loraJoined;
 
 //#14 reset the processor when frame count reaches a threshold
@@ -136,27 +135,24 @@ DS18B20 ds_room(A0);
 boolean useTestTemperature = false;
 float testTemperature;
 
-/*
- * Mote Record Structure
- */
 #define _DEVICE_PROFILE 41
 
 struct ctl_parms {
 	float curtain_setpoint_temp;
 	float curtain_idleband_degrees;
-#define curtain_cyclesecs 30
-#define curtain_onsecs 6
+#define CURTAIN_CYCLESECS 300
+#define CURTAIN_ONSECS 60
 	float heatpad_setpoint_temp;
 	float heatpad_idleband_degrees;
 	float stirfan_setforward_degrees;
 #define stirfan_idleband_degrees 4.0
 	float spaceheater_setback_degrees;
 	float spaceheater_idleband_degrees;
-#define ventilation_cyclesecs 30
-	float  ventilation_setback_degrees;
-	float  ventilation_df_min;
-  float  ventilation_df_max;
-#define fogger_cyclesecs 30
+#define EVACFAN_CYCLESECS 30
+	float  evacfan_setback_degrees;
+	float  evacfan_df_min;
+  float  evacfan_df_max;
+#define FOGGER_CYCLESECS 300
 	float  fogger_setforward_degrees;
   float  fogger_rampup_degrees;
 	float  fogger_df_min;
@@ -195,26 +191,36 @@ typedef struct moterecord Record;
 Record moteRec;
 char b[sizeof(moteRec)];
 
-/*
- * This is the message that is sent via RS485 serial
- * down to the switch box
- */
-struct rs485packet {
+#define MOTECMD_CONFIGURE 0xCF
+#define MOTECMD_TESTTEMP  0xC7
+#define MOTECMD_RESET     0xC5
+
+const byte numBytes = 32;
+byte receivedBytes[numBytes];
+byte numReceived = 0;
+
+boolean newData = false;
+
+struct __attribute__((__packed__)) rs485packet {
   uint8_t  command;
-  uint8_t  cksum;
   uint16_t switches;
 };
 
+uint16_t lastSwitches;
+
 typedef struct rs485packet Rs485Packet;
 Rs485Packet rPacket;
-char rsbytes[sizeof(rPacket)];
+byte rsbytes[sizeof(rPacket) + 3];
 
-uint16_t lastSwitches = 0;
+#define START_MARKER      (uint8_t) 0x3C
+#define END_MARKER        (uint8_t) 0x3E
+
+#define CMD_SENDSWITCHES  (uint8_t) 0xD3
+#define ACK_SENDSWITCHES  (uint8_t) 0xD4
 
 #define _PROCESS_TIME_MILLIS 1000
 long upTimeSecs;
 long lastProcessMillis;
-long heatingTimeSecs;
 
 void bareMetal(byte* b) {
   SerialDebug.println("Bare Metal");
@@ -227,9 +233,9 @@ void bareMetal(byte* b) {
 	cfg.stirfan_setforward_degrees = 15.0;    //p[4]
 	cfg.spaceheater_setback_degrees = 25.0;   //p[5]
 	cfg.spaceheater_idleband_degrees = 4.0;   //p[6]
-  cfg.ventilation_setback_degrees = 20.0;   //p[7]
-	cfg.ventilation_df_min = 20.0;            //p[8]
-  cfg.ventilation_df_max = 100.0;           //p[9]
+  cfg.evacfan_setback_degrees = 20.0;       //p[7]
+	cfg.evacfan_df_min = 20.0;                //p[8]
+  cfg.evacfan_df_max = 100.0;               //p[9]
 	cfg.fogger_setforward_degrees = 5.0;      //p[10]
   cfg.fogger_rampup_degrees = 10.0;         //p[11]
 	cfg.fogger_df_min = 20.0;                 //p[12]
@@ -302,73 +308,156 @@ void os_getDevKey (u1_t* buf) {
   memcpy_P(buf, appKey, 16);
 }
 
+void scheduleNextRS485Send(void);			//predeclared here
+void scheduleNextLoRaSend(void);			//predeclared here
+
+uint8_t calculateChecksum(byte* b, uint16_t size) {
+  uint16_t cksum = 0;
+  for (uint8_t n=0; n<size; n++) {
+    cksum += b[n];
+  }
+  return (cksum%256);
+}
+/*
+ * calculate checksum, add start and end-markers and send it
+*/
+void sendRS485(osjob_t* j) {
+  rsbytes[0] = START_MARKER;
+  memcpy(rsbytes+1,&rPacket,sizeof(rPacket));
+  rsbytes[sizeof(rPacket)+1] = calculateChecksum(rsbytes+1,sizeof(rPacket));
+  rsbytes[sizeof(rPacket)+2] = END_MARKER;
+  #if defined(RS485_MESSAGES)
+  SerialDebug.print("sendRS485: ");
+  for (uint8_t n=0; n<sizeof(rPacket)+3; n++) {
+    if (rsbytes[n]<16)
+      SerialDebug.print("0");
+    SerialDebug.print(rsbytes[n],HEX);
+  }
+  SerialDebug.println();
+  #endif
+  digitalWrite(RS485_DIR, HIGH);        //transmit
+  delay(100);
+  rs485Serial.write(rsbytes, sizeof(rPacket)+3);
+  delay(100);  //rs485Serial.flush();                 //block until buffer empty
+  digitalWrite(RS485_DIR, LOW);        //receive
+  //scheduleNextLoRaSend();
+}
+
 void buildMoteRec() {
   moteRec.heatpad_temp = getHeatPadTemp();
   moteRec.room_temp = getRoomTemp();
-  moteRec.evac_pct = ventilationController.getDutyFactor();
+  moteRec.evac_pct = evacfanController.getDutyFactor();
   moteRec.fogg_pct = foggerController.getDutyFactor();
   memcpy(moteRec.config, &cfg, sizeof(cfg));
-  //Serial.print("room "); Serial.println(moteRec.room_temp);
-  //Serial.print("pads "); Serial.println(moteRec.heatpad_temp);
+}
+
+void recvBytesWithStartEndMarkers() {
+    static boolean recvInProgress = false;
+    static byte ndx = 0;    
+    byte rb;   
+
+    while (rs485Serial.available() > 0 && newData == false) {
+        rb = rs485Serial.read();
+        /*
+        if (rb<16)
+          Serial.print("0");
+        Serial.print(rb, HEX);
+        */
+        if (recvInProgress == true) {
+            if (rb != END_MARKER) {
+                receivedBytes[ndx] = rb;
+                ndx++;
+                if (ndx >= numBytes) {
+                    ndx = numBytes - 1;
+                }
+            }
+            else {
+                receivedBytes[ndx] = '\0'; // terminate the string
+                recvInProgress = false;
+                numReceived = ndx;  // save the number for use when printing
+                ndx = 0;
+                newData = true;
+            }
+        }
+
+        else if (rb == START_MARKER) {
+            recvInProgress = true;
+        }
+    }
+}
+
+void parseSerialData() {
+    if (newData == true) {
+        if (receivedBytes[sizeof(rPacket)] == calculateChecksum(receivedBytes,sizeof(rPacket))) {
+          memcpy(&rPacket, receivedBytes, sizeof(rPacket));
+          switch(rPacket.command) {
+            case ACK_SENDSWITCHES: {
+               #if defined(RS485_MESSAGES)
+               SerialDebug.println("RS485 ACK_SENDSWITCHES received");
+               #endif          
+              lastSwitches = moteRec.switches;
+              break;
+            } 
+            default: SerialDebug.println("Unrecognized command."); break;
+          }
+        } else {
+          #if defined(RS485_MESSAGES)
+          SerialDebug.print("RS485 cksum bad "); SerialDebug.println(calculateChecksum(receivedBytes,sizeof(rPacket)), HEX);
+          #endif
+        }
+        newData = false;
+    }
 }
 
 void processLoop() {
-  //SerialDebug.print("."); SerialDebug.println(sizeof(cfg));
+  SerialDebug.print(".");
   moteRec.switches = 0x0000;
   float padTempF = moteRec.heatpad_temp; //getHeatPadTemp();
-  
-  heatPad_OP = heatPadController.poll(padTempF);
-  moteRec.switches |= heatPad_OP;
-  
-  float roomTempF = moteRec.room_temp; //getRoomTemp();
-  //moteRec.heatpad_temp = padTempF;
-  //moteRec.room_temp = roomTempF;
-  //SerialDebug.print("roomT="); SerialDebug.println(roomTempF);
-  //SerialDebug.print("hpadT="); SerialDebug.println(padTempF);
-  
-  spaceHeater_OP = spaceHeaterController.poll(roomTempF);
-  moteRec.switches |= (spaceHeater_OP << 1);
-  
-  curtain_OP = curtainController.poll(roomTempF); //roomTempF);
-  if (curtain_OP == _CLOSING)
-    moteRec.switches |= (0x04);
-  if (curtain_OP == _OPENING)
-    moteRec.switches |= (0x08);
+  float roomTempF = moteRec.room_temp;   //getRoomTemp();
 
-  stirFan_OP = stirFanController.poll(padTempF); //roomTempF);
-  moteRec.switches |= (stirFan_OP << 4);
-  
-  ventilation_OP = ventilationController.poll(roomTempF);
-  moteRec.switches |= (ventilation_OP << 5);
+  moteRec.switches = moteRec.switches | heatPadController.poll(padTempF);      
+  moteRec.switches = moteRec.switches | spaceHeaterController.poll(roomTempF);  
+  moteRec.switches = moteRec.switches | curtainController.poll(roomTempF);
+  moteRec.switches = moteRec.switches | stirFanController.poll(roomTempF);  
+  moteRec.switches = moteRec.switches | evacfanController.poll(roomTempF);  
+  moteRec.switches = moteRec.switches | foggerController.poll(roomTempF);
 
-  fogger_OP = foggerController.poll(roomTempF);
-  moteRec.switches |= (fogger_OP << 6);
+  #if defined(DEBUG_PROCESS_MESSAGES)
+  char s[64];
+  sprintf(s,"switches=0x%X lastSwitches=0x%X", moteRec.switches, lastSwitches);
+  SerialDebug.println(s);
+  #endif
 
   if (moteRec.switches != lastSwitches) {
-    rPacket.command = 0xD3;
-    uint16_t bitmask = 0x0001;
-    uint8_t cksum = 0;
-    for (uint8_t n=0; n<16; n++) {
-      if ((moteRec.switches & bitmask) == bitmask)
-        cksum += 1;
-      bitmask = bitmask << 1;
-    }
-    rPacket.cksum = cksum;
+    rPacket.command = CMD_SENDSWITCHES;
     rPacket.switches = moteRec.switches;
-    memcpy(rsbytes, &rPacket, sizeof(rPacket));
-    SerialTerminal.write(rsbytes);
-    lastSwitches = moteRec.switches;
-  }
+    os_setCallback(&sendRS485Job, sendRS485);
+    #if defined(DEBUG_PROCESSLOOP_MESSAGES)
+    SerialDebug.println("RS485 send queued");
+    #endif
+  }   
 }
 
-void scheduleNextSend(void);			//predeclared here
+void testRS485(osjob_t* j) {
+  static uint16_t switches = 0x8000;
+  rPacket.command = 0xD3;
+  rPacket.switches = switches;
+  switches = switches >> 1;
+  if (switches == 0x0000)
+    switches = 0x8000;
+  os_setCallback(&sendRS485Job, sendRS485);
+}
+
 /*
  * do_send() is called periodically to send sensor data
  */
 void do_send(osjob_t* j) {
-	if (LMIC.opmode & OP_TXRXPEND) {
+  if (LMIC.opmode & OP_TXRXPEND) {    
 	  // Check if there is a current TX/RX job running
     } else {
+      #if defined(DEBUG_LORA_SEND)
+      SerialDebug.println("do_send");
+      #endif
       buildMoteRec();
       if (ackReceived)
         moteRec.lastackreceived = (uint8_t) 1;
@@ -386,7 +475,8 @@ void do_send(osjob_t* j) {
         ackRequested = false;
         ackReceived = false;
       }
-      scheduleNextSend();
+      
+      scheduleNextLoRaSend();
     }
 }
 
@@ -401,51 +491,30 @@ void sitUbu() {
 /*
  * alarmMatch() is invoked when the rtcZero clock alarms.
  */
-void alarmMatch()  {
+void loraSendAlarmMatch()  {
   //the following call attempts to avoid collisions with other motes by randomizing the send time
-  os_setTimedCallback(&sendjob, os_getTime()+ms2osticks(random(200)), do_send);
+  os_setTimedCallback(&sendLoRaJob, os_getTime()+ms2osticks(random(200)), do_send);
   frameCount++;
-  scheduleNextSend();
+  //scheduleNextLoRaSend();
 }
 
-void scheduleNextSend() {
-  // set alarm for TX_INTERVAL_SECONDS from now
-  rtc.setAlarmEpoch( rtc.getEpoch() + TX_INTERVAL_SECONDS);
+void scheduleNextLoRaSend() {
+  // set alarm for LORA_TX_INTERVAL_SECONDS from now
+  rtc.setAlarmEpoch( rtc.getEpoch() + LORA_TX_INTERVAL_SECONDS);
   rtc.enableAlarm(rtc.MATCH_YYMMDDHHMMSS);
-  rtc.attachInterrupt(alarmMatch);
+  rtc.attachInterrupt(loraSendAlarmMatch);
 }
 
 void onEvent (ev_t ev) {
-  #ifdef _DEBUG_SERIAL
-  Serial.print(os_getTime());
-  Serial.print(": ["); Serial.print(ev); Serial.print("] ");
+  #ifdef DEBUG_LORA_EVENTS
+  SerialDebug.print(os_getTime());
+  SerialDebug.print(": ["); SerialDebug.print(ev); SerialDebug.print("] ");
   #endif
+
   switch(ev) {
-    /*
-    case EV_SCAN_TIMEOUT:
-      #ifdef _DEBUG_SERIAL
-      Serial.println(F("SCAN_TIMEOUT"));
-      #endif
-      break;
-    case EV_BEACON_FOUND:
-      #ifdef _DEBUG_SERIAL
-      Serial.println(F("BEACON_FOUND"));
-      #endif
-      break;
-    case EV_BEACON_MISSED:
-      #ifdef _DEBUG_SERIAL
-      Serial.println(F("BEACON_MISSED"));
-      #endif
-      break;
-    case EV_BEACON_TRACKED:
-      #ifdef _DEBUG_SERIAL
-      Serial.println(F("BEACON_TRACKED"));
-      #endif
-      break;
-    */
     case EV_JOINING:
       #ifdef _DEBUG_SERIAL
-      Serial.println(F("JOINING"));
+      SerialDebug.println(F("JOINING"));
       #endif
       break;
     case EV_JOINED: {
@@ -456,82 +525,66 @@ void onEvent (ev_t ev) {
       LMIC_getSessionKeys(&netid, &devaddr, nwkKey, artKey);
       loraJoined = true;
       #ifdef _DEBUG_SERIAL
-      Serial.println(F("JOINED"));
+      SerialDebug.println(F("JOINED"));
       /*
-      Serial.print("netid: ");
-      Serial.println(netid, DEC);
-      Serial.print("devaddr: "); // @suppress("Method cannot be resolved")
-      Serial.println(devaddr, HEX);
-      Serial.print("artKey: ");
+      SerialDebug.print("netid: ");
+      SerialDebug.println(netid, DEC);
+      SerialDebug.print("devaddr: "); // @suppress("Method cannot be resolved")
+      SerialDebug.println(devaddr, HEX);
+      SerialDebug.print("artKey: ");
       for (int i=0; i<sizeof(artKey); ++i) {
         if (i != 0)
-          Serial.print("-");
-        Serial.print(artKey[i], HEX);
+          SerialDebug.print("-");
+        SerialDebug.print(artKey[i], HEX);
       }
-      Serial.println("");
-      Serial.print("nwkKey: ");
+      SerialDebug.println("");
+      SerialDebug.print("nwkKey: ");
       for (int i=0; i<sizeof(nwkKey); ++i) {
         if (i != 0)
-          Serial.print("-");
-        Serial.print(nwkKey[i], HEX);
+          SerialDebug.print("-");
+        SerialDebug.print(nwkKey[i], HEX);
       }
-      Serial.println("");
+      SerialDebug.println("");
       */
       #endif
       LMIC_setLinkCheckMode(0);
       break;
     }
-    /*
-    case EV_JOIN_FAILED:
-      #ifdef _DEBUG_SERIAL
-      Serial.println(F("JOIN_FAIL"));
-      #endif
-      loraJoined = false;
-      scheduleNextSend(); //goToSleep();
-      break;
-    case EV_REJOIN_FAILED:
-      #ifdef _DEBUG_SERIAL
-      Serial.println(F("REJOIN_FAIL"));
-      #endif
-      loraJoined = false;
-      scheduleNextSend(); //goToSleep();
-      break;
-    */
+    
     case EV_TXCOMPLETE:
       digitalWrite(LED_BUILTIN, LOW);     // LED Off
       #ifdef _DEBUG_SERIAL
-      //Serial.println(F("TXCOMPLETE"));
+      //SerialDebug.println(F("TXCOMPLETE"));
       #endif
       if ((ackRequested) && (LMIC.txrxFlags & TXRX_ACK)) {
         // if confirmation was requested and is received - cycle the WATCHDOG bit
         ackReceived = true;
-        #ifdef _DEBUG_SERIAL
-        //Serial.println(F("Ack"));
+        #if defined(DEBUG_MESSAGES)
+        SerialDebug.println(F("LoRa Ack"));
         #endif
       }
       // Check if we have a downlink on either Rx1 or Rx2 windows
       if ((LMIC.txrxFlags & ( TXRX_DNW1 | TXRX_DNW2 )) != 0) {
-#ifdef _DEBUG_SERIAL
-    	  /*
-      	if ((LMIC.txrxFlags & TXRX_DNW1) != 0)
-       	  Serial.print(F("DRx1-"));
+        #ifdef DEBUG_LORA_DOWNLINK
+    	  if ((LMIC.txrxFlags & TXRX_DNW1) != 0)
+       	  SerialDebug.print(F("DRx1-"));
        	else
-       	  Serial.print(F("DRx2-"));
-       	  */
-#endif
+       	  SerialDebug.print(F("DRx2-"));
+        #endif
+
        	if (LMIC.dataLen) {
                    
-       	  #ifdef _DEBUG_SERIAL
-       	  //Serial.print(LMIC.dataLen);
+       	  #ifdef DEBUG_LORA_DOWNLINK
+       	  SerialDebug.print(LMIC.dataLen);
        	  // Receive bytes in LMIC.frame are the B64 decode of the
        	  // 'data' field sent by ChirpStack
           
        	  for (int i = 0; i < LMIC.dataLen; i++) {
             if (LMIC.frame[LMIC.dataBeg + i]<16)
-              Serial.print("0");
-       	    Serial.print(LMIC.frame[LMIC.dataBeg + i], HEX);
+              SerialDebug.print("0");
+       	    SerialDebug.print(LMIC.frame[LMIC.dataBeg + i], HEX);
        	  }
-       	  Serial.println();
+       	  SerialDebug.println();
        	  #endif
           uint8_t cksum = 0;
           for (int i = 2; i < LMIC.dataLen; i++) {
@@ -539,78 +592,110 @@ void onEvent (ev_t ev) {
           }
           if (cksum == LMIC.frame[LMIC.dataBeg + 1]) {
             if (LMIC.frame[LMIC.dataBeg]==0xCF) {
-              Serial.println("Charlie Foxtrot");
+              #if defined(DEBUG_LORA_DOWNLINK_COMMANDS)
+              SerialDebug.println("Charlie Foxtrot - configure");
+              #endif
               uint16_t config_id = cfg.configuration_id;
               initialize(LMIC.frame + LMIC.dataBeg + 2);
               cfg.configuration_id = config_id;
               storeConfig();
               reboot();
-            } else if (LMIC.frame[LMIC.dataBeg]==0xC7) { 
-              Serial.println("Charlie Seven");
+            } else if (LMIC.frame[LMIC.dataBeg]==0xC7) {
+              #if defined(DEBUG_LORA_DOWNLINK_COMMANDS) 
+              SerialDebug.println("Charlie Seven - set test temperature");
+              #endif
               memcpy(&test, LMIC.frame + LMIC.dataBeg + 2, sizeof(test));
               useTestTemperature = true;
               moteRec.mode = MODE_TEST;
-            } else if (LMIC.frame[LMIC.dataBeg]==0xC5) { 
-              Serial.println("Charlie Five");
+              evacfanController.reset();
+              foggerController.reset();
+              curtainController.reset();
+            } else if (LMIC.frame[LMIC.dataBeg]==0xC5) {
+              #if defined(DEBUG_LORA_DOWNLINK_COMMANDS) 
+              SerialDebug.println("Charlie Five - reset");
+              #endif
               reboot();
             }
           } else {
-            Serial.print("ckSum bad: "); 
-            Serial.print(cksum); Serial.print(" should be "); Serial.println(LMIC.frame[LMIC.dataBeg + 1]);
-            for (int i = 0; i < LMIC.dataLen; i++) {
+            #if defined(DEBUG_LORA_DOWNLINK)
+              char s[64];
+              sprintf(s,"cksum calc=%X actual=%X", cksum, LMIC.frame[LMIC.dataBeg + 1]);
+              SerialDebug.println(s);
+              for (int i = 0; i < LMIC.dataLen; i++) {
               if (LMIC.frame[LMIC.dataBeg + i]<16)
-                Serial.print("0");
-       	      Serial.print(LMIC.frame[LMIC.dataBeg + i], HEX);
+                SerialDebug.print("0");
+       	      SerialDebug.print(LMIC.frame[LMIC.dataBeg + i], HEX);
        	    }
-       	    Serial.println();
+       	    SerialDebug.println();
+            #endif            
           }          
        	}
       }
       break;
-      /*
-    case EV_LOST_TSYNC:
+    #if defined(DEBUG_LORA_EVENTS)
+    case EV_SCAN_TIMEOUT:
       #ifdef _DEBUG_SERIAL
-      Serial.println(F("EV_LOST_TSYNC"));
+      SerialDebug.println(F("SCAN_TIMEOUT"));
       #endif
       break;
-    case EV_RESET:
+    case EV_BEACON_FOUND:
       #ifdef _DEBUG_SERIAL
-      Serial.println(F("EV_RESET"));
+      SerialDebug.println(F("BEACON_FOUND"));
       #endif
+      break;
+    case EV_BEACON_MISSED:
+      #ifdef _DEBUG_SERIAL
+      SerialDebug.println(F("BEACON_MISSED"));
+      #endif
+      break;
+    case EV_BEACON_TRACKED:
+      #ifdef _DEBUG_SERIAL
+      SerialDebug.println(F("BEACON_TRACKED"));
+      #endif
+      break;
+    case EV_JOIN_FAILED:
+      #ifdef _DEBUG_SERIAL
+      SerialDebug.println(F("JOIN_FAIL"));
+      #endif
+      loraJoined = false;
+      scheduleNextLoRaSend(); //goToSleep();
+      break;
+    case EV_REJOIN_FAILED:
+      #ifdef _DEBUG_SERIAL
+      SerialDebug.println(F("REJOIN_FAIL"));
+      #endif
+      loraJoined = false;
+      scheduleNextLoRaSend(); //goToSleep();
+      break;
+    case EV_LOST_TSYNC:
+      SerialDebug.println(F("EV_LOST_TSYNC"));
+      break;
+    case EV_RESET:
+      SerialDebug.println(F("EV_RESET"));
       loraJoined = false;
       break;
     case EV_RXCOMPLETE:
       // data received in ping slot
-      #ifdef _DEBUG_SERIAL
-      Serial.println(F("EV_RXCOMPLETE"));
-      #endif
+      SerialDebug.println(F("EV_RXCOMPLETE"));
       break;
     case EV_LINK_DEAD:
       //no confirmation has been received for an extended perion
-      #ifdef _DEBUG_SERIAL
-      Serial.println(F("EV_LINK_DEAD"));
-      #endif
+      SerialDebug.println(F("EV_LINK_DEAD"));
       loraJoined = false;
-      scheduleNextSend(); //goToSleep();
+      scheduleNextLoRaSend(); //goToSleep();
       break;
     case EV_LINK_ALIVE:
-      #ifdef _DEBUG_SERIAL
-      Serial.println(F("EV_LINK_ALIVE"));
-      #endif
+      SerialDebug.println(F("EV_LINK_ALIVE"));
       break;
-      */
     case EV_TXSTART:
-      #ifdef _DEBUG_SERIAL
-      Serial.println(F("EV_TXSTART"));
-      #endif
+      SerialDebug.println(F("EV_TXSTART"));
       //digitalWrite(LED_BUILTIN, LOW);
       break;
     default:
-      #ifdef _DEBUG_SERIAL
-      //Serial.print(F("Unknown event: "));
-      //Serial.println((unsigned) ev);
-      #endif
+      SerialDebug.print(F("Unknown event: "));
+      SerialDebug.println((unsigned) ev);
       break;
+    #endif  
   }
 }
 
@@ -623,6 +708,9 @@ void setup() {
   pinMode(_WATCHDOG_DONE, OUTPUT);					 // Watchdog Done pin
   digitalWrite(_WATCHDOG_DONE, LOW);
 
+  pinMode(RS485_DIR, OUTPUT);
+  digitalWrite(RS485_DIR, LOW);
+  
   SerialDebug.begin(115200);
 
 #if defined (WAIT_FOR_SERIALDEBUG)
@@ -661,10 +749,10 @@ void setup() {
   SerialDebug.println();
 
   float evacfunc[4][3] = {
-  {0.0,cfg.ventilation_df_min,0.0},
-  {(cfg.curtain_setpoint_temp-cfg.ventilation_setback_degrees),0.0,((cfg.ventilation_df_max-cfg.ventilation_df_min)/ (cfg.ventilation_setback_degrees-(cfg.curtain_idleband_degrees/2.0))) },
-  {(cfg.curtain_setpoint_temp-(cfg.curtain_idleband_degrees/2.0)),0.0,((cfg.ventilation_df_min-cfg.ventilation_df_max)/ (cfg.ventilation_setback_degrees-(cfg.curtain_idleband_degrees/2.0))) },
-  {(cfg.curtain_setpoint_temp+(cfg.curtain_idleband_degrees/2.0)),-cfg.ventilation_df_max,0.0}
+  {0.0,cfg.evacfan_df_min,0.0},
+  {(cfg.curtain_setpoint_temp-cfg.evacfan_setback_degrees),0.0,((cfg.evacfan_df_max-cfg.evacfan_df_min)/ (cfg.evacfan_setback_degrees-(cfg.curtain_idleband_degrees/2.0))) },
+  {(cfg.curtain_setpoint_temp-(cfg.curtain_idleband_degrees/2.0)),0.0,((cfg.evacfan_df_min-cfg.evacfan_df_max)/ (cfg.evacfan_setback_degrees-(cfg.curtain_idleband_degrees/2.0))) },
+  {(cfg.curtain_setpoint_temp+(cfg.curtain_idleband_degrees/2.0)),-cfg.evacfan_df_max,0.0}
 };
 
   float foggfunc[4][3] = {
@@ -694,20 +782,20 @@ void setup() {
 
   curtainController.setDeviceName("curtain");
   curtainController.setOutput(CURTAIN_OPENOUTPUT, CURTAIN_CLOSEOUTPUT);
-  curtainController.set(curtain_cyclesecs,
-		                curtain_onsecs,
+  curtainController.set(CURTAIN_CYCLESECS,
+		                CURTAIN_ONSECS,
 						        cfg.curtain_setpoint_temp,
 						        cfg.curtain_idleband_degrees);
   curtainController.dumpConfig();
  
-  ventilationController.setDeviceName("vent");
-  ventilationController.setOutput(VENTILATION_OUTPUT);
-  ventilationController.setCycleTimeSecs(ventilation_cyclesecs);
-  ventilationController.setFunction(evacfunc);
+  evacfanController.setDeviceName("evac");
+  evacfanController.setOutput(EVAC_OUTPUT);
+  evacfanController.setCycleTimeSecs(EVACFAN_CYCLESECS);
+  evacfanController.setFunction(evacfunc);
 
   foggerController.setDeviceName("fogger");
   foggerController.setOutput(FOGGER_OUTPUT);
-  foggerController.setCycleTimeSecs(fogger_cyclesecs);
+  foggerController.setCycleTimeSecs(FOGGER_CYCLESECS);
   foggerController.setFunction(foggfunc);
 
   //get the DEVEUI from the EEPROM
@@ -753,22 +841,31 @@ void setup() {
   SerialDebug.println("Setup completed.");
   #endif
 
-  //randomSeed(analogRead(1));	//seed the random number generator
   frameCount=0;
-  SerialTerminal.begin(115200);
+  rs485Serial.begin(9600);
+  digitalWrite(RS485_DIR, HIGH);
+  // Assign pins 10 & 11 SERCOM functionality
+  //pinPeripheral(10, PIO_SERCOM);
+  //pinPeripheral(11, PIO_SERCOM);
+
+  lastSwitches = 0xFFFF;
+
   moteRec.mode = MODE_NORMAL;
   loraJoined = true;
-  do_send(&sendjob);
+  do_send(&sendLoRaJob);
+  lastProcessMillis = millis(); // + 5 * _PROCESS_TIME_MILLIS;
+
 }
+
+uint16_t switches = 0x8000;
 
 void loop() {
   os_runloop_once();
-
+  recvBytesWithStartEndMarkers();
+  parseSerialData();
   if (loraJoined && ( (millis() - lastProcessMillis) > _PROCESS_TIME_MILLIS )) {
-  	processLoop();
-#if defined(BTSERIALTERMINAL)
-  	term.readSerial();
-#endif
+  	processLoop();  
+    //os_setCallback(&processJob, processLoop);  
   	sitUbu();
   	lastProcessMillis = millis();
   }

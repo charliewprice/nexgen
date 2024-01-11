@@ -5,6 +5,8 @@
 #ifndef CurtainController__h
 #define CurtainController__h
 
+#include "common.h"
+
 #define _IDLE      0
 #define _CLOSING   1
 #define _CLOSESOAK 2
@@ -20,19 +22,21 @@
 class CurtainController {
   public:
     CurtainController();
-    uint8_t poll(float tempF);
-    void setOutput(uint8_t openpin, uint8_t closepin);
+    uint16_t poll(float tempF);
+    void setOutput(uint16_t openpin, uint16_t closepin);
     void set(uint16_t periodSecs, uint16_t onSecs,
 	           double setpointDegrees, double idlebandDegrees);
     void test();
     void dumpConfig();
     uint8_t getStatus();
     void setDeviceName(const char *s);
+    void reset();
 
   private:
     char name[16];
-    uint8_t openpin;
-    uint8_t closepin;
+    uint16_t openpin;
+    uint16_t closepin;
+    uint16_t lastRc;
     uint16_t periodSecs;
     uint16_t onSecs;
     uint16_t cycleSecsRemaining;

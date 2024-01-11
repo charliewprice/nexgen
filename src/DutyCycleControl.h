@@ -9,6 +9,8 @@
 
 #include <Arduino.h>
 
+#include "common.h"
+
 #define OFF 0
 #define ON  1
 

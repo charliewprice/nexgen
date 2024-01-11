@@ -1,0 +1,9 @@
+#define SerialDebug Serial
+
+//#define DEBUG_MESSAGES
+//#define DEBUG_LORA_DOWNLINK
+//#define DEBUG_LORA_DOWNLINK_COMMANDS
+//#define DEBUG_LORA_EVENTS
+//#define RS485_MESSAGES
+//#define DEBUG_PROCESSLOOP_MESSAGES
+//#define DEBUG_LORA_SEND

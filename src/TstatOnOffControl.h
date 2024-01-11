@@ -6,6 +6,8 @@
  */
 #include <Arduino.h>
 
+#include "common.h"
+
 #ifndef TstatOnOffControl_H_
 #define TstatOnOffControl_H_
 
@@ -20,10 +22,10 @@ class TstatOnOffControl {
     TstatOnOffControl();
     ~TstatOnOffControl();
     void setMode(uint8_t mode);
-    void setOutput(uint8_t pin);
-    uint8_t poll(float tempF);
+    void setOutput(uint16_t pin);
+    uint16_t poll(float tempF);
     void set(float setPointF, float hysteresisF);
-    void test();
+    //void test();
     uint8_t getStatus();
     float getLastTemp();
     float getSetPoint();
@@ -31,9 +33,9 @@ class TstatOnOffControl {
     void  dumpConfig();
   private:
     char name[16];
-    uint8_t ssrPin;
+    uint16_t onpin;
     float setpoint, idleband, lastTemp;
-    uint8_t lastOutput;
+    uint16_t lastOutput;
     uint8_t mode;
 
 };

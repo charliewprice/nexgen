@@ -17,10 +17,8 @@ TstatOnOffControl::~TstatOnOffControl() {
 
 }
 
-void TstatOnOffControl::setOutput(uint8_t pin) {
-	ssrPin = pin;
-	pinMode(ssrPin, OUTPUT);
-	digitalWrite(ssrPin, HIGH);
+void TstatOnOffControl::setOutput(uint16_t pin) {
+	onpin = pin;
 	lastOutput = HIGH;
 }
 
@@ -34,12 +32,12 @@ void TstatOnOffControl::set(float setPointF, float idlebandF) {
   /*
   char display[32];
   sprintf(display,"%s sp=%u ib=%u",name,(uint8_t) setpoint,(uint8_t) idleband);
-  Serial.println(display);
+  SerialDebug.println(display);
   */
 }
 
 void TstatOnOffControl::dumpConfig() {
-  Serial.print(name); Serial.print(" SP="); Serial.print(setpoint); Serial.print(" IB="); Serial.println(idleband);
+  SerialDebug.print(name); SerialDebug.print(" SP="); SerialDebug.print(setpoint); SerialDebug.print(" IB="); SerialDebug.println(idleband);
 }
 
 void TstatOnOffControl::setDeviceName(const char *s) {
@@ -69,45 +67,47 @@ uint8_t TstatOnOffControl::getStatus() {
 
   return rc;
 }
-
+/*
 void TstatOnOffControl::test() {
-  if (lastOutput == HIGH)
+  if (lastOutput == 0x0000HIGH)
 	digitalWrite(ssrPin, LOW);
   else
 	digitalWrite(ssrPin, HIGH);
 
   lastOutput = !lastOutput;
 }
+*/
 
-uint8_t TstatOnOffControl::poll(float tempF) {
-  //Serial.print(name); Serial.print("-> "); Serial.print(tempF); Serial.print(" -> ");
+uint16_t TstatOnOffControl::poll(float tempF) {
+  uint16_t rc = 0x0000;
+  //SerialDebug.print(name); SerialDebug.print("-> "); SerialDebug.print(tempF); SerialDebug.print(" -> ");
   lastTemp = tempF;
   if (tempF < (setpoint-idleband/2)) {
 	if (mode==MODE_HEAT) {
-	  //Serial.println("ON ");
-	  digitalWrite(ssrPin, LOW);
-	  lastOutput = LOW;
+	  //SerialDebug.println("ON ");
+	  rc = onpin;
+	  lastOutput = rc;
 	} else {
-	  //Serial.println("OFF ");
-	  digitalWrite(ssrPin, HIGH);
-	  lastOutput = HIGH;
+	  //SerialDebug.println("OFF ");
+	  rc = 0x0000;
+	  lastOutput = rc;
 	}
   } else if (tempF > (setpoint+idleband/2)) {
 	if (mode==MODE_HEAT) {
-	  //Serial.println("OFF ");
-	  digitalWrite(ssrPin, HIGH);
-	  lastOutput = HIGH;
+	  //SerialDebug.println("OFF ");
+	  rc = 0x0000;
+	  lastOutput = rc;
 	} else {
-	  //Serial.println("ON ");
-	  digitalWrite(ssrPin, LOW);
-	  lastOutput = LOW;
+	  //SerialDebug.println("ON ");
+	  rc = onpin;
+	  lastOutput = rc;
 	}
   } else {	
-	//Serial.println("SOAK");
-	digitalWrite(ssrPin, lastOutput);
+	//SerialDebug.println("SOAK");
+	rc = lastOutput;
   }
 
-  return !lastOutput;
+  return rc;
 
 }
 

@@ -8,6 +8,7 @@ CurtainController* ctl;
 
 CurtainController::CurtainController() {
   status = _IDLE;
+  cycleSecsRemaining = periodSecs;
 }
 
 void CurtainController::set(uint16_t pSecs, uint16_t oSecs,
@@ -23,13 +24,14 @@ void CurtainController::set(uint16_t pSecs, uint16_t oSecs,
 void CurtainController::dumpConfig() {
 	char buf[64];
 	sprintf(buf,"%s psecs %u osecs %u",name,periodSecs,onSecs);
-	Serial.println(buf);
-	Serial.print(setpointDegrees); Serial.print(" "); Serial.println(idlebandDegrees);
+	SerialDebug.println(buf);
+	SerialDebug.print(setpointDegrees); SerialDebug.print(" "); SerialDebug.println(idlebandDegrees);
 }
 
-void CurtainController::setOutput(uint8_t op, uint8_t cp) {
+void CurtainController::setOutput(uint16_t op, uint16_t cp) {
 	openpin = op;
 	closepin = cp;
+	lastRc = 0x0000;
 }
 
 void CurtainController::setDeviceName(const char *s) {
@@ -46,39 +48,42 @@ uint8_t CurtainController::getStatus() {
   return status;
 }
 
-uint8_t CurtainController::poll(float temperature) {
-  //Serial.print(cycleSecsRemaining); Serial.print(" temp "); Serial.print(temperature);
+void CurtainController::reset() {
+	cycleSecsRemaining = 0;
+}
+
+uint16_t CurtainController::poll(float temperature) {
+  uint16_t rc = 0x0000;  
+
   if (cycleSecsRemaining == 0) {	
-	//Serial.println(" CYC ");
 	cycleSecsRemaining = periodSecs;
-  } else if (cycleSecsRemaining==periodSecs) {	
 	if (temperature<(setpointDegrees-(idlebandDegrees/2))) {
 	   status = _CLOSING;
+	   rc = closepin;
+	   lastRc = rc;
+	   //SerialDebug.print("CLOSE ");
 	} else if (temperature>(setpointDegrees+(idlebandDegrees/2))) {
 	   status = _OPENING;
+	   rc = openpin;
+	   lastRc = rc;
+	   //SerialDebug.print("OPEN ");
 	} else {
 	   status = _IDLE;
-	}
-
-	//Serial.print(" "); Serial.print(status);
-
-	switch (status) {
-		case _CLOSING: digitalWrite(closepin, OUTPUT_ON); break; //Serial.println(" CLOSING"); break;
-		case _OPENING: digitalWrite(openpin, OUTPUT_ON);  break; //Serial.println(" OPENING"); break;
-	    default: break; //Serial.println(" IDLE"); break; 
+	   rc = 0x0000;
+	   lastRc = rc;
+	   //SerialDebug.print("IDLE ");
 	}  
-	cycleSecsRemaining -= 1;
   } else if (cycleSecsRemaining < (periodSecs - onSecs)) {
-	  //Serial.println(" SOAKING ");
-	  digitalWrite(closepin, OUTPUT_OFF);
-	  digitalWrite(openpin, OUTPUT_OFF);
+	  rc = 0x0000;
+	  lastRc = rc;
 	  status = _SOAKING;
-	  cycleSecsRemaining -= 1;
+	  //SerialDebug.print("SOAKING ");
   } else {
-	//Serial.println("");
-	cycleSecsRemaining -= 1;
+	rc = lastRc;
   }
-  return status;
+  //SerialDebug.println(cycleSecsRemaining);
+  cycleSecsRemaining -= 1;
+  return rc;
 }
 
 
